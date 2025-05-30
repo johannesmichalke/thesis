@@ -17,6 +17,7 @@ source venv/bin/activate
 
 pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
+pip install uvicorn
 
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
