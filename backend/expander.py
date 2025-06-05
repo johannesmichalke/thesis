@@ -15,10 +15,16 @@ def expand_shorthands(node):
     if isinstance(node, Const):
         if node.value == 0:
             return Zero()
-        result = One()
-        for _ in range(node.value - 1):
-            result = Add(result, One())
-        return result
+
+        if node.value > 0:  # positive constants stay as before
+            result = One()
+            for _ in range(node.value - 1):
+                result = Add(result, One())
+            return result
+
+        # --- NEW: negative constants ---
+        # −n  is rewritten as 0 −  n
+        return Sub(Zero(), expand_shorthands(Const(-node.value)))
 
     if isinstance(node, Mult):
         result = Var(node.var)
@@ -31,6 +37,14 @@ def expand_shorthands(node):
             expand_shorthands(node.left),
             expand_shorthands(node.right)
         )
+
+    if isinstance(node, Sub):  # NEW
+        left = expand_shorthands(node.left)  # NEW
+        right = expand_shorthands(node.right)  # NEW
+        return Sub(left, right)  # NEW
+
+    if isinstance(node, Const):  # NEW
+        return node
 
     if isinstance(node, LessEqual):
         return LessEqual(

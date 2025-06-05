@@ -28,6 +28,13 @@ class Add:
     def __repr__(self):
         return f"({self.left} + {self.right})"
 
+class Sub:
+    def __init__(self, left, right):
+        self.left = left
+        self.right = right
+    def __repr__(self):
+        return f"({self.left} - {self.right})"
+
 class Mult:
     def __init__(self, n, var):
         self.n = n

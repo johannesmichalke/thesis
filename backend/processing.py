@@ -182,7 +182,7 @@ edge   [fontname="Latin Modern Math", fontsize=10, labelfloat=false];
 
 
 def string_to_automaton(string):
-    #string = "(EX z. x = 4z) AND (EX w. y = 4w)" #  OR
+     #  OR
     try:
         tree = parser.parse_formula(string)  # Invalid formula
     except UnexpectedInput as e:
@@ -277,4 +277,6 @@ def string_to_automaton(string):
 
     # Convert DOT to LaTeX (TikZ) with dot2tex
     #import subprocess
-    #subprocess.run(["dot2tex", "-tmath","graph.dot", "-o", "graph.tex"])
+    #subpr
+     # ocess.run(["dot2tex", "-tmath","graph.dot", "-o", "graph.tex"])
+

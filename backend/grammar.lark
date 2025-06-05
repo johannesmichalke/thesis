@@ -1,56 +1,52 @@
-// grammar.lark
-
 ?start: formula
 
-// Formulas
 ?formula: implication
 
 ?implication: equivalence
-             | equivalence "->" implication  -> implies
+             | equivalence "->" implication        -> implies
 
 ?equivalence: or_expr
-             | or_expr "<->" equivalence     -> iff
+             | or_expr "<->" equivalence           -> iff
 
 ?or_expr: and_expr
-        | or_expr "OR" and_expr              -> or_expr
+        | or_expr "OR" and_expr                    -> or_expr
 
 ?and_expr: not_expr
-         | and_expr "AND" not_expr           -> and_expr
+         | and_expr "AND" not_expr                 -> and_expr
 
-?not_expr: "NOT" atom                        -> not_expr
+?not_expr: "NOT" atom                              -> not_expr
          | atom
 
 ?atom: comparison
      | quantifier
-     | "(" formula ")"
+     | "(" formula ")"                             -> parent     // NEW – parentheses around *any* formula
 
-// Quantifiers
-?quantifier: EX VAR "." formula           -> ex_quantifier
-            | ALL VAR "." formula          -> all_quantifier
+?quantifier: EX VAR "." formula                    -> ex_quantifier
+            | ALL VAR "." formula                 -> all_quantifier
 
-EX: "EX"
-ALL: "ALL"
+?comparison: term "<=" term                        -> leq
+           | term "=" term                         -> eq
+           | term "<" term                         -> less
+           | term ">" term                         -> greater
+           | term ">=" term                        -> greater_equal
 
-// Atomic Formulas: Comparisons between terms
-?comparison: term "<=" term                  -> leq
-           | term "=" term                   -> eq
-           | term "<" term                   -> less
-           | term ">" term                   -> greater
-           | term ">=" term                  -> greater_equal
-
-// Terms
 ?term: sum
 
 ?sum: product
-    | sum "+" product                        -> add
+    | sum "+" product                              -> add
+    | sum "-" product                              -> sub
 
-?product: CONST VAR                          -> mult
+?product: CONST VAR                                -> mult
         | factor
 
-?factor: VAR                                 -> var
-       | CONST                               -> const
+?factor: "-" factor          -> unary_minus
+       | VAR                 -> var
+       | CONST               -> const
+       | "(" term ")"        -> parent
 
-// Lexical tokens
+EX: "EX" | "E"
+ALL: "ALL" | "A"
+
 VAR: /[a-z][a-z0-9_]*/i
 CONST: /[0-9]+/
 

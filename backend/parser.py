@@ -8,7 +8,6 @@ from lark import UnexpectedInput
 with open("grammar.lark") as file:
     grammar = file.read()
 
-# Initialize parser
 parser = Lark(grammar, start="start")
 
 # parser.py
@@ -16,6 +15,15 @@ parser = Lark(grammar, start="start")
 @v_args(inline=True)
 class ASTTransformer(Transformer):
     # Variables and constants
+    def unary_minus(self, expr):
+        # --- FIX START ---
+        if isinstance(expr, Const):
+            # -7  ➜  Const(-7)
+            return Const(-expr.value)
+        # --- FIX END ---
+        # For non-constants keep it as 0 - t
+        return Sub(Zero(), expr)
+
     def var(self, token):
         return Var(str(token))
 
@@ -29,6 +37,8 @@ class ASTTransformer(Transformer):
     def add(self, left, right):
         return Add(left, right)
 
+    def sub(self, left, right):
+        return Sub(left, right)
     # Comparisons
     def leq(self, left, right):
         return LessEqual(left, right)
@@ -66,6 +76,9 @@ class ASTTransformer(Transformer):
 
     def all_quantifier(self, _all_token, var, formula):
         return ForAll(var, formula)
+
+    def parent(self, expr):
+        return expr
 
 
 def visualize_whitespace(line: str) -> str:

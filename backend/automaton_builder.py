@@ -339,12 +339,17 @@ def count_tree(node):
         if isinstance(t, Var):
             coefficients[t.name] = coefficients.get(t.name, 0) + i
         elif isinstance(t, One):
-            ones -= i
+            ones -= i                      # already there
+        elif isinstance(t, Const):         # NEW  (handles ±N)
+            ones -= i * t.value
         elif isinstance(t, Zero):
-            pass  # do nothing
+            pass
         elif isinstance(t, Add):
-            helper(t.left, i)
+            helper(t.left,  i)
             helper(t.right, i)
+        elif isinstance(t, Sub):
+            helper(t.left,  i)
+            helper(t.right, -i)
         else:
             raise ValueError(f"Unexpected term node: {type(t)}")
     helper(node.left, 1)
