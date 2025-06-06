@@ -2,28 +2,46 @@
 
 import { useState } from 'react';
 import Script from 'next/script';
+import GraphvizViewer from './components/GraphvizViewer';
 
 export default function Home() {
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [pdfURL, setPdfURL] = useState<string>();
+  const [dotString, setDotString] = useState<string>();
   const [variables, setVariables] = useState<string[]>([]);
   const [showHelp, setShowHelp] = useState(false);
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
 
-  const handleBuild = async () => {
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setInput(content);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleBuild = async (variableOrder: string[] = []) => {
     setLoading(true);
     setError(null);
-    setVariables([]);
-    setPdfURL(undefined);
+    setDotString(undefined);
     
     try {
-      const response = await fetch('/api/automaton', {
+      const requestBody = {
+        formula: input.trim(),
+        variable_order: variableOrder
+      };
+
+      const response = await fetch('/api/automaton/dot', {
         method: 'POST',
         headers: {
-          'Content-Type': 'text/plain',
+          'Content-Type': 'application/json',
         },
-        body: input,
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -37,15 +55,7 @@ export default function Home() {
       }
 
       const data = await response.json();
-      // Decode base64 PDF
-      const byteCharacters = atob(data.pdf_base64);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: 'application/pdf' });
-      setPdfURL(URL.createObjectURL(blob));
+      setDotString(data.dot);
       setVariables(data.variables || []);
     } catch (err) {
       const errorMsg = (err instanceof Error ? err.message : 'An error occurred')
@@ -58,14 +68,35 @@ export default function Home() {
     }
   };
 
+  const handleDragStart = (index: number) => {
+    setDraggedIndex(index);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e: React.DragEvent, targetIndex: number) => {
+    e.preventDefault();
+    if (draggedIndex === null) return;
+
+    const newVariables = [...variables];
+    const [draggedItem] = newVariables.splice(draggedIndex, 1);
+    newVariables.splice(targetIndex, 0, draggedItem);
+
+    setVariables(newVariables);
+    setDraggedIndex(null);
+    handleBuild(newVariables);
+  };
+
   return (
-    <main className="min-h-screen p-8">
+    <main className="min-h-screen p-4">
       <Script
         src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
         strategy="beforeInteractive"
       />
       
-      <div className="max-w-4xl mx-auto space-y-8">
+      <div className="max-w-[90%] mx-auto space-y-8">
         <h1 className="text-3xl font-bold text-center">Presburger Arithmetical Expression to Automaton</h1>
         
         <div className="space-y-4">
@@ -81,6 +112,22 @@ export default function Home() {
             placeholder="Enter a Presburger Arithmetical Expression..."
             className="w-full h-32 p-4 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-2xl"
           />
+          
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 cursor-pointer">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+              </svg>
+              Upload Formula
+              <input
+                type="file"
+                accept=".txt"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+            </label>
+            <span className="text-sm text-gray-500">Upload a .txt file containing your formula</span>
+          </div>
           
           {/* Help Section */}
           <div className="mt-2">
@@ -153,7 +200,7 @@ CONST: /[0-9]+/
           </div>
           
           <button
-            onClick={handleBuild}
+            onClick={() => handleBuild()}
             disabled={loading}
             className="w-full py-2 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -170,26 +217,34 @@ CONST: /[0-9]+/
           </pre>
         )}
 
-        {/* PDF and variables display */}
-        {pdfURL && (
+        {/* Graph and variables display */}
+        {dotString && (
           <>
             {variables.length > 0 && (
-              <div className="flex items-center gap-2 my-4">
-                <span className="font-semibold text-gray-700">Variable order from top to bottom:</span>
-                {variables.map((v, i) => (
-                  <span key={i} className="px-2 py-1 bg-blue-100 text-blue-800 rounded font-mono border border-blue-200">
-                    {v}
-                  </span>
-                ))}
+              <div className="flex flex-col gap-2 my-4">
+                <span className="font-semibold text-gray-700">Variable order (drag to reorder):</span>
+                <div className="flex flex-wrap gap-2">
+                  {variables.map((v, i) => (
+                    <div
+                      key={v}
+                      draggable
+                      onDragStart={() => handleDragStart(i)}
+                      onDragOver={handleDragOver}
+                      onDrop={(e) => handleDrop(e, i)}
+                      className={`px-3 py-2 bg-blue-100 text-blue-800 rounded font-mono border border-blue-200 cursor-move hover:bg-blue-200 transition-colors ${
+                        draggedIndex === i ? 'opacity-50' : ''
+                      }`}
+                    >
+                      {v}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
             <div className="border rounded-lg overflow-hidden">
-              <object data={pdfURL} type="application/pdf" width="100%" height="600">
-                <p>
-                  Your browser cant display embedded PDFs.
-                  <a href={pdfURL} className="text-blue-500 hover:text-blue-600 ml-2">Download it instead.</a>
-                </p>
-              </object>
+              <div className="w-full aspect-[3/2]">
+                <GraphvizViewer dot={dotString} />
+              </div>
             </div>
           </>
         )}

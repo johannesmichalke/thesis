@@ -1,282 +1,387 @@
 import os
-import subprocess
-import tempfile
+import re
+from collections import defaultdict
+from typing import List, Tuple
 
 from lark import UnexpectedInput
 
-import syntax_tree_visualizier
-import parser
-import re
-import expander
-from automaton_builder import build_automaton, setup
-from libmata.alphabets import *
-from automaton_builder import is_deterministic
-from automaton_builder import determinize
-import libmata.nfa.nfa as mata_nfa
-from collections import defaultdict
+import syntax_tree_visualizier  # type: ignore
+import parser  # type: ignore
+import expander  # type: ignore
+from automaton_builder import build_automaton, is_deterministic, determinize  # type: ignore
+import libmata.nfa.nfa as mata_nfa  # type: ignore
+
+###############################################################################
+# Helper utilities                                                             #
+###############################################################################
 
 
-
-def run_or_fail(cmd, **kwargs):
-    """Run a command and raise an exception with full stdout/stderr if it fails."""
-    from subprocess import run, PIPE
-
-    result = run(cmd, stdout=PIPE, stderr=PIPE, text=True, **kwargs)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"\n\n🚨 Command failed: {' '.join(cmd)}\n\n"
-            f"--- STDOUT ---\n{result.stdout}\n"
-            f"--- STDERR ---\n{result.stderr}"
-        )
-    return result.stdout
+def int_to_bitstring(i: int, width: int) -> str:
+    """Return *width*-bit two’s-complement binary representation of *i*."""
+    return f"{i:0{width}b}"
 
 
-def parse_graphviz_to_json(dot_str: str):
-    nodes = {}
-    edges = []
-    initial = None
+###############################################################################
+# Wild-card compression utilities                                              #
+###############################################################################
 
-    lines = dot_str.strip().splitlines()
 
-    for line in lines:
-        line = line.strip()
+def _can_merge(a: str, b: str) -> str | None:
+    """Return merged pattern if *a* and *b* differ by **exactly one** concrete bit.
 
-        # Match accepting states (doublecircle)
-        m_accepting = re.match(r'(\w+)\s+\[shape=doublecircle\];', line)
-        if m_accepting:
-            state = m_accepting.group(1)
-            nodes[state] = {"id": f"q{state}", "accepting": True}
+    Both patterns must have equal length. The merge is only permitted when the
+    differing position contains concrete bits (``0``/``1``) in both patterns
+    (never ``*``). The result is the pattern with a ``*`` at that position.
+    Otherwise ``None`` is returned.
+    """
+    if len(a) != len(b):
+        return None
+
+    diff_pos = -1
+    for idx, (ca, cb) in enumerate(zip(a, b)):
+        if ca == cb:
             continue
+        # Abort if either side already has a wildcard here.
+        if ca == "*" or cb == "*":
+            return None
+        # More than one differing bit? no merge.
+        if diff_pos != -1:
+            return None
+        diff_pos = idx
 
-        # Match initial state (i0 -> ...)
-        m_initial = re.match(r'i0\s+->\s+(\w+);', line)
-        if m_initial:
-            initial = f"q{m_initial.group(1)}"
-            continue
+    if diff_pos == -1:  # identical
+        return None
 
-        # Match edges with LaTeX labels
-        m_edge = re.match(r'(\w+)\s+->\s+\{\s*(\w+)\s*\}\s+\[.*texlbl="(.*?)"\];', line)
-        if m_edge:
-            src, tgt, texlbl = m_edge.groups()
-            src_id = f"q{src}"
-            tgt_id = f"q{tgt}"
-            labels = [label.strip() for label in texlbl.split(r",\,")]
-            edges.append({
-                "source": src_id,
-                "target": tgt_id,
-                "labels": labels
-            })
-            # Ensure nodes are present
-            for s in [src, tgt]:
-                if s not in nodes:
-                    nodes[s] = {"id": f"q{s}", "accepting": False}
+    merged = list(a)
+    merged[diff_pos] = "*"
+    return "".join(merged)
 
-    return {
-        "nodes": list(nodes.values()),
-        "edges": edges,
-        "initial": initial
-    }
 
-_edge_line = re.compile(r'^(\s*)(\d+)\s*->\s*\{\s*(\d+)\s*\}\s*\[(.*)\];\s*$')
+def _compress_bit_patterns(patterns: List[str]) -> List[str]:
+    """Iteratively merge patterns using the * wildcard.
 
-def combine_parallel_edges(dot: str) -> str:
-    groups = defaultdict(list)
-    header = []
-    footer = []
+    The algorithm keeps merging two patterns whenever they can be merged until
+    no more merges are possible. The resulting list is returned *sorted* for
+    determinism.
+    """
+    work: set[str] = set(patterns)
+
+    merged_something = True
+    while merged_something:
+        merged_something = False
+        items = list(work)
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                merged = _can_merge(items[i], items[j])
+                if merged:
+                    work.discard(items[i])
+                    work.discard(items[j])
+                    work.add(merged)
+                    merged_something = True
+                    break
+            if merged_something:
+                break
+
+    return sorted(work)
+
+
+def compress_label_string(label_str: str) -> str:
+    """Compress a comma-separated list of bit-strings using wild-cards.
+
+    Example::
+        >>> compress_label_string("01,10,11")
+        '01,1*'
+    """
+    labels = [lbl.strip() for lbl in label_str.split(",") if lbl.strip()]
+    if not labels:
+        return ""
+    compressed = _compress_bit_patterns(labels)
+    return ",".join(compressed)
+
+
+###############################################################################
+# DOT helper: reorder bit-labels after a variable permutation                  #
+###############################################################################
+
+def _reorder_bit_patterns_in_label(label: str,
+                                   mapping: dict[int, int],
+                                   width: int) -> str:
+    """
+    Reorder every bit-pattern inside *label* according to *mapping*.
+
+    *label* is the raw string that appears inside `label="..."` – it can contain
+    several comma-separated patterns that may include wild-cards (`*`).
+
+    Any pattern that
+        * has length *width*, **and**
+        * consists only of `0 1 *`
+    is permuted; everything else (epsilon, 'ε', etc.) is left unchanged.
+    """
+    parts = [p.strip() for p in label.split(",") if p.strip()]
+    new_parts: list[str] = []
+
+    inv = {new_idx: old_idx for old_idx, new_idx in mapping.items()}
+
+    for p in parts:
+        if len(p) == width and all(c in "01*" for c in p):
+            reordered = [""] * width
+            for new_idx in range(width):
+                old_idx = inv[new_idx]
+                reordered[new_idx] = p[old_idx]
+            new_parts.append("".join(reordered))
+        else:
+            new_parts.append(p)            # untouched (epsilon, etc.)
+
+    return ",".join(new_parts)
+
+
+def reorder_bitstring_labels(dot: str,
+                             mapping: dict[int, int],
+                             width: int) -> str:
+    """
+    Apply the bit-position permutation encoded in *mapping* to **all** edge
+    labels in *dot* and return the updated DOT string.
+    """
+    label_re = re.compile(r'(\[label=")([^"]*)("\])')
+
+    def _repl(m: re.Match[str]) -> str:
+        prefix, raw, suffix = m.groups()
+        new_raw = _reorder_bit_patterns_in_label(raw, mapping, width)
+        return f'{prefix}{new_raw}{suffix}'
+
+    return label_re.sub(_repl, dot)
+
+
+###############################################################################
+# DOT manipulation                                                             #
+###############################################################################
+
+# Matches lines of the form "  2 -> { 3 } [label=\"0,1\"] ;"
+_EDGE_LINE = re.compile(r"^(\s*)(\d+)\s*->\s*\{\s*(\d+)\s*\}\s*\[(.*)\];\s*$")
+_LABEL_ATTR = re.compile(r'label\s*=\s*"([^"]*)"')
+
+
+def convert_int_labels_to_bitstrings(dot: str, width: int) -> str:
+    """Replace integer edge labels with binary strings of *width* bits."""
+
+    def _repl(match: re.Match[str]) -> str:
+        raw = match.group(1)
+        parts = [p.strip() for p in raw.split(",")]
+        converted: list[str] = []
+        for part in parts:
+            if part.isdigit():
+                converted.append(int_to_bitstring(int(part), width))
+            else:  # already something else (epsilon, *, ...)
+                converted.append(part)
+        return f'label="{",".join(converted)}"'
+
+    return _LABEL_ATTR.sub(_repl, dot)
+
+
+###############################################################################
+# New step 1: merge parallel edges                                             #
+###############################################################################
+
+
+def merge_parallel_edges(dot: str) -> str:
+    """Combine parallel edges (same *src* ➜ *dst*) and concatenate their labels.
+
+    The labels are **not** compressed here – we simply unify them into a single
+    comma-separated list. Wild-card compression is handled in a later pass.
+    """
+    groups: dict[Tuple[str, str, str], List[str]] = defaultdict(list)
+    header: List[str] = []
+    footer: List[str] = []
     in_edges = False
 
-    # We’ll collect the “other” lines into header until we hit the first edge,
-    # then into footer once we’ve passed all edges.
     for line in dot.splitlines(keepends=True):
-        m = _edge_line.match(line)
+        m = _EDGE_LINE.match(line)
         if m:
             in_edges = True
             indent, src, dst, attrs = m.groups()
-            # find the texlbl="…"
-            tm = re.search(r'texlbl="([^"]+)"', attrs)
-            if tm:
-                raw = tm.group(1).strip().strip('$')
-                groups[(indent, src, dst)].append(raw)
+            lab_match = _LABEL_ATTR.search(attrs)
+            if lab_match:
+                labels = [l.strip() for l in lab_match.group(1).split(",") if l.strip()]
             else:
-                # if it has no texlbl, treat it as footer (or you could pass it through)
-                footer.append(line)
+                labels = []
+            groups[(indent, src, dst)].extend(labels)
         else:
-            if not in_edges:
-                header.append(line)
-            else:
-                footer.append(line)
+            # Decide whether we are before or after the edge section.
+            (header if not in_edges else footer).append(line)
 
-    # build merged edges
-    merged = []
-    for (indent, src, dst), raws in groups.items():
-        # join with commas (and a little spacing)
-        combo = ',\\,'.join(raws)
-        tex = f'${combo}$'
-        merged.append(
-            f'{indent}{src} -> {{ {dst} }} [label=" " texlbl="{tex}"];\n'
+    merged_edge_lines: List[str] = []
+    for (indent, src, dst), labels in groups.items():
+        # Keep original order but remove duplicates.
+        seen: set[str] = set()
+        uniq_labels = []
+        for lbl in labels:
+            if lbl not in seen:
+                seen.add(lbl)
+                uniq_labels.append(lbl)
+        label_str = ",".join(uniq_labels)
+        merged_edge_lines.append(
+            f"{indent}{src} -> {{ {dst} }} [label=\"{label_str}\"]\n"
         )
 
-    return ''.join(header) + ''.join(merged) + ''.join(footer)
+    return "".join(header) + "".join(merged_edge_lines) + "".join(footer)
 
 
-def bit_vector_latex_map(n):
+###############################################################################
+# New step 2: apply wild-card compression to each edge label                  #
+###############################################################################
+
+
+def _merge_patterns(patterns):
     """
-    Returns a dict mapping each raw LaTeX vector (as a Python str)
-    to its integer index.
+    Repeatedly merge sub-labels that differ in exactly one position,
+    replacing that position with ‘*’, until no further merges are possible.
     """
-    result = {}
-    for i in range(2 ** n):
-        bits = f"{i:0{n}b}"
-        # join bits with LaTeX linebreaks "\\" to get, e.g., "0\\1"
-        body = r"\\".join(bits)
-        tex = r"\left[\begin{array}{c}" + body + r"\end{array}\right]"
-        result[tex] = i
-    return result
+    patterns = set(patterns)
+    changed = True
 
-def replace_dot_labels_with_latex(dot_str: str, n: int) -> str:
-    raw_map = {v: k for k, v in bit_vector_latex_map(n).items()}
+    while changed:
+        changed = False
+        new_patterns, merged = set(), set()
+        pat_list = list(patterns)
 
-    latex_map = {}
-    for i, raw in raw_map.items():
-        latex_map[i] = raw  # don't add $ here
+        for i in range(len(pat_list)):
+            for j in range(i + 1, len(pat_list)):
+                a, b = pat_list[i], pat_list[j]
+                if len(a) != len(b):
+                    continue
 
-    def _repl(m):
-        raw_vals = m.group(1).split(',')
-        texlbls = []
+                # Compare character-wise
+                diff, combo = 0, []
+                for c1, c2 in zip(a, b):
+                    if c1 == c2:
+                        combo.append(c1)
+                    else:
+                        diff += 1
+                        combo.append('*')
+                    if diff > 1:
+                        break
 
-        for val in raw_vals:
-            val = val.strip()
-            if '\\begin{array}' in val:  # already LaTeX
-                texlbls.append(val)
-            else:
-                try:
-                    idx = int(val)
-                    tex = latex_map.get(idx, val)
-                except ValueError:
-                    tex = val
-                texlbls.append(tex)
+                # Merge if they differed in **exactly** one place
+                if diff == 1:
+                    merged.update({a, b})
+                    new_patterns.add(''.join(combo))
 
-        joined = ',\\,'.join(texlbls)
-        return f'label=" " texlbl="$' + joined + '$"'
+        # Anything not merged stays; add all new combos
+        next_round = (patterns - merged) | new_patterns
+        if next_round != patterns:
+            patterns, changed = next_round, True
 
-    return re.sub(r'label="([^"]+)"', _repl, dot_str)
-#∃z(x= 4z) ∧∃w(y= 4w)
-
-
-def prettify_dot(dot_str: str) -> str:
-    header = r"""
-rankdir=LR;
-splines=true;
-overlap=false;
-nodesep=0.6;
-ranksep=0.7;
-margin=0.15;
-graph  [dpi=110];
-node   [shape=circle, fixedsize=true, width=0.6, height=0.6,
-        fontname="Latin Modern Math", fontsize=11];
-edge   [fontname="Latin Modern Math", fontsize=10, labelfloat=false];
-"""
-    return dot_str.replace("digraph finiteAutomaton {",
-                           "digraph finiteAutomaton {\n" + header,
-                           1)
+    return patterns
 
 
-def string_to_automaton(string):
-     #  OR
-    try:
-        tree = parser.parse_formula(string)  # Invalid formula
-    except UnexpectedInput as e:
-        raise e
+def simplify_automaton_labels(dot: str) -> str:
+    """
+    Take a DOT string of a finite automaton, merge the transition
+    labels per the given rule, and return the updated DOT string.
+    """
+    label_re = re.compile(r'\[label="([^"]+)"\]')
+
+    def _replace(match):
+        raw = match.group(1)
+        parts = [p.strip() for p in raw.split(',')]
+        merged = _merge_patterns(parts)
+        return f'[label="{", ".join(sorted(merged))}"]'
+
+    return label_re.sub(_replace, dot)
+
+###############################################################################
+
+def add_rankdir_auto(dot: str) -> str:
+    """
+    Inspects the bounding box and node count in the DOT string and inserts:
+    - rankdir=LR or TB depending on shape
+    - ratio=fill only if node count exceeds a threshold
+    """
+    lines = dot.strip().splitlines()
+
+    # 1. Try to extract bounding box
+    width = height = None
+    for line in lines:
+        if 'bb="' in line:
+            match = re.search(r'bb="0,0,(\d+),(\d+)"', line)
+            if match:
+                width = int(match.group(1))
+                height = int(match.group(2))
+            break
+
+    # 2. Count nodes
+    node_lines = [line for line in lines if re.match(r'^\s*\d+\s+\[', line)]
+    node_count = len(node_lines)
+
+    # 3. Decide layout direction
+    rankdir = "LR" if width and height and width > height else "TB"
+
+    # 4. Insert layout instructions
+    for i, line in enumerate(lines):
+        if line.strip().startswith("digraph"):
+            # Insert after "digraph G {"
+            insert_lines = [
+                f'layout=dot;',
+                f'rankdir={rankdir};',
+                'size="12,8";'
+            ]
+            if node_count >= 5:  # apply ratio=fill only if graph is "big enough"
+                insert_lines.insert(0, 'ratio=fill;')
+            for j, content in enumerate(insert_lines):
+                lines.insert(i + 1 + j, content)
+            break
+
+    return "\n".join(lines)
+###############################################################################
+# Pipeline                                                                     #
+###############################################################################
+
+
+def formula_to_dot(formula: str, variable_order : List[str]) -> Tuple[List[str], str]:
+    tree = parser.parse_formula(formula)  # may raise UnexpectedInput
     pure_tree = expander.expand_shorthands(tree)
     syntax_tree_visualizier.syntax_tree_to_dot(tree, filename="syntax_tree")
+
     aut, variables = build_automaton(pure_tree)
     if not is_deterministic(aut):
         aut = determinize(aut)
     aut = mata_nfa.minimize(aut)
-    dot_string = aut.to_dot_str()
-    print(dot_string)
-    dot_string = combine_parallel_edges(dot_string)
-    print(dot_string)
-    dot_string = replace_dot_labels_with_latex(dot_string, len(variables))
-    print(dot_string)
-    dot_string = prettify_dot(dot_string)
-    #payload = parse_graphviz_to_json(dot_string)
-    #print("step1 done")
-    with tempfile.TemporaryDirectory() as tmp:
-        # --- filenames INSIDE tmp ---
-        dot_file = "graph.dot"
-        tikz_raw = "graph_raw.tex"
-        tex_file = "graph.tex"
-        pdf_file = "graph.pdf"
-        svg_file = "graph.svg"
 
-        # 1. write DOT
-        with open(os.path.join(tmp, dot_file), "w") as f:
-            f.write(dot_string)
-
-        # 2. dot2tex
-        run_or_fail(
-            ["dot2tex",
-             "--figonly",
-             "-ftikz",
-             "--tikzedgelabels",
-             "--autosize",  # shrink to content
-             "--graphstyle={>=latex}",
-             dot_file,
-             "-o", tikz_raw],
-            cwd=tmp
-        )
-
-        # 3. wrap + write graph.tex
-        with open(os.path.join(tmp, tikz_raw)) as f:
-            tikz_code = f.read()
-        wrapper = r"""\documentclass[tikz,border=0pt]{standalone}
-        \usepackage{amsmath}
-        \usepackage{tikz}
-        \tikzset{
-          every edge node/.style={sloped, font=\small, midway}
+    dot = aut.to_dot_str()
+    dot = convert_int_labels_to_bitstrings(dot, len(variables))
+    if variable_order:
+        if set(variable_order) != set(variables):
+            raise AssertionError(
+                "variable_order must be a permutation of the internal "
+                f"variables {variables}, got {variable_order}"
+            )
+        mapping = {
+            old_idx: variable_order.index(var)
+            for old_idx, var in enumerate(variables)
         }
-        \begin{document}
-        """ + tikz_code + r"\end{document}"
-        with open(os.path.join(tmp, tex_file), "w") as f:
-            f.write(wrapper)
+        dot = reorder_bitstring_labels(dot, mapping, len(variables))
+        variables = variable_order[:]
+    dot = merge_parallel_edges(dot)
+    dot = simplify_automaton_labels(dot)
+    dot = add_rankdir_auto(dot)
+    return variables, dot
 
-        # 4. pdflatex  (run IN tmp, no -output-directory flag needed)
-        run_or_fail(
-            ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", tex_file],
-            cwd=tmp
-        )
 
-        # sanity-check
-        full_pdf = os.path.join(tmp, pdf_file)
-        if not os.path.isfile(full_pdf) or os.path.getsize(full_pdf) == 0:
-            raise RuntimeError("graph.pdf missing or empty after pdflatex")
+###############################################################################
+# CLI / demo                                                                   #
+###############################################################################
 
-        with open(os.path.join(tmp, "graph.pdf"), "rb") as f:
-            return variables, f.read()
-        # 5. dvisvgm  (also IN tmp)
-        #run_or_fail(
-        #    ["dvisvgm", "--pdf", "--no-fonts", "--exact", "-p", "1",
-        #     pdf_file, "-o", svg_file],
-        #    cwd=tmp
-        #)
 
-        # 6. read SVG
-        #with open(os.path.join(tmp, svg_file)) as f:
-        #    svg_data = f.read()
-    #return svg_data
-    #dot_string = dot_string.replace(
-    #    "digraph finiteAutomaton {",
-    #    'digraph finiteAutomaton {\nrankdir=LR;\n splines=true;\n overlap=false;\n nodesep=0.5;\n ranksep=0.5;\n node [shape=circle width=0.6 fixedsize=true];\n edge [labelfloat=false];',
-    #    1
-    #)
-    # Save DOT string to file
-    #print(dot_string)
-    #with open("graph.dot", "w") as f:
-    #    f.write(dot_string)
+def main() -> None:
+    example = "(EX z. x = 4z) AND (EX w. y = 4w)"  # sample input
+    vars_, dot_out = formula_to_dot(example)
 
-    # Convert DOT to LaTeX (TikZ) with dot2tex
-    #import subprocess
-    #subpr
-     # ocess.run(["dot2tex", "-tmath","graph.dot", "-o", "graph.tex"])
+    # Write DOT file next to script for inspection.
+    out_path = os.path.join(os.path.dirname(__file__), "graph.dot")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(dot_out)
+    print(f"Wrote DOT ({len(vars_)} variables) to {out_path}")
 
+
+if __name__ == "__main__":
+    main()

@@ -1,21 +1,45 @@
-from fastapi import FastAPI, Response, Request
-from lark import UnexpectedInput
+from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
-import base64
-from processing import string_to_automaton
+from pydantic import BaseModel
+from lark import UnexpectedInput
+from typing import List
+
+from processing import formula_to_dot  # <- now expects (formula, variable_order)
 
 app = FastAPI()
 
-@app.post("/automaton/pdf")
-async def automaton_pdf(request: Request):
-    src = (await request.body()).decode("utf-8")
-    try:
-        variables, pdf_bytes = string_to_automaton(src)
-    except UnexpectedInput as e:
-        return Response(content=f"Syntax error: {e}", media_type="text/plain", status_code=400)
+class FormulaRequest(BaseModel):
+    formula: str
+    variable_order: List[str] = []
 
-    pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
-    return JSONResponse(content={
-        "pdf_base64": pdf_base64,
-        "variables": variables
-    })
+@app.post("/automaton/dot")
+async def automaton_dot(req: FormulaRequest):
+    formula = req.formula
+    variable_order = req.variable_order
+    print(formula)
+    print(variable_order)
+    try:
+        variables, dot_string = formula_to_dot(formula, variable_order)
+    except UnexpectedInput as exc:
+        try:
+            context = exc.get_context(formula)
+        except Exception:
+            context = str(exc)
+        return Response(
+            content="Syntax error:\n" + context,
+            media_type="text/plain",
+            status_code=400,
+        )
+    except AssertionError as exc:
+        return Response(
+            content="Syntax error:\n" + str(exc),
+            media_type="text/plain",
+            status_code=400,
+        )
+
+    return JSONResponse(
+        content={
+            "dot": dot_string,
+            "variables": variables,
+        }
+    )

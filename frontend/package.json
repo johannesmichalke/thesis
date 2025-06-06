@@ -9,13 +9,16 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@hpcc-js/wasm": "^2.22.4",
     "@types/cytoscape": "^3.21.9",
     "@types/dagre": "^0.7.52",
+    "@types/react-beautiful-dnd": "^13.1.8",
     "cytoscape": "^3.32.0",
     "cytoscape-dagre": "^2.5.0",
     "dagre": "^0.8.5",
     "next": "15.3.2",
     "react": "^19.0.0",
+    "react-beautiful-dnd": "^13.1.1",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
