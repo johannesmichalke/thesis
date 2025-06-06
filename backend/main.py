@@ -16,10 +16,9 @@ class FormulaRequest(BaseModel):
 async def automaton_dot(req: FormulaRequest):
     formula = req.formula
     variable_order = req.variable_order
-    print(formula)
-    print(variable_order)
     try:
         variables, dot_string = formula_to_dot(formula, variable_order)
+        print(variables)
     except UnexpectedInput as exc:
         try:
             context = exc.get_context(formula)

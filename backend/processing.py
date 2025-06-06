@@ -17,8 +17,11 @@ import libmata.nfa.nfa as mata_nfa  # type: ignore
 
 
 def int_to_bitstring(i: int, width: int) -> str:
-    """Return *width*-bit two’s-complement binary representation of *i*."""
-    return f"{i:0{width}b}"
+    """
+    Return *width*-bit two’s-complement binary representation of *i*
+    *little-endian* (LSB-first) so it matches the automaton’s encoding.
+    """
+    return f"{i:0{width}b}"[::-1]          # <— reverse to LSB-first
 
 
 ###############################################################################
