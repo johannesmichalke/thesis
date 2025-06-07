@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import Script from 'next/script';
 import GraphvizViewer from './components/GraphvizViewer';
+import ExampleSolutions from './components/ExampleSolutions';
 
 export default function Home() {
   const [input, setInput] = useState('');
@@ -10,8 +11,11 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [dotString, setDotString] = useState<string>();
   const [variables, setVariables] = useState<string[]>([]);
+  const [exampleSolutions, setExampleSolutions] = useState<any[]>([]);
   const [showHelp, setShowHelp] = useState(false);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [kSolutions, setKSolutions] = useState(3);
+  const [forceExpandExample, setForceExpandExample] = useState(false);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -20,20 +24,25 @@ export default function Home() {
       reader.onload = (e) => {
         const content = e.target?.result as string;
         setInput(content);
+        setKSolutions(3);
+        // Use the content directly in the request instead of waiting for state update
+        handleBuild([], 3, false, content);
       };
       reader.readAsText(file);
     }
   };
 
-  const handleBuild = async (variableOrder: string[] = []) => {
+  const handleBuild = async (variableOrder: string[] = [], kOverride?: number, forceExpand?: boolean, formulaOverride?: string) => {
     setLoading(true);
     setError(null);
     setDotString(undefined);
-    
+    setExampleSolutions([]);
+    if (forceExpand) setForceExpandExample(true);
     try {
       const requestBody = {
-        formula: input.trim(),
-        variable_order: variableOrder
+        formula: (formulaOverride ?? input).trim(),
+        variable_order: variableOrder,
+        k_solutions: kOverride ?? kSolutions,
       };
 
       const response = await fetch('/api/automaton/dot', {
@@ -51,18 +60,23 @@ export default function Home() {
           .replace(/ /g, '\u00A0');
         console.log('Error message received:', JSON.stringify(errorMsg));
         setError(errorMsg);
+        setForceExpandExample(false);
         return;
       }
 
       const data = await response.json();
+      console.log('API response:', data);
       setDotString(data.dot);
       setVariables(data.variables || []);
+      setExampleSolutions(data.example_solutions || []);
+      setForceExpandExample(false);
     } catch (err) {
       const errorMsg = (err instanceof Error ? err.message : 'An error occurred')
         .replace(/\t/g, '    ')
         .replace(/ /g, '\u00A0');
       console.log('Error message received:', JSON.stringify(errorMsg));
       setError(errorMsg);
+      setForceExpandExample(false);
     } finally {
       setLoading(false);
     }
@@ -89,6 +103,19 @@ export default function Home() {
     handleBuild(newVariables);
   };
 
+  const handleFormulaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    setKSolutions(3);
+  };
+
+  const handleAddExample = () => {
+    setKSolutions((prev) => {
+      const next = prev + 1;
+      handleBuild(variables, next, true);
+      return next;
+    });
+  };
+
   return (
     <main className="min-h-screen p-4">
       <Script
@@ -102,10 +129,11 @@ export default function Home() {
         <div className="space-y-4">
           <textarea
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleFormulaChange}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
+                setKSolutions(3);
                 handleBuild();
               }
             }}
@@ -200,7 +228,7 @@ CONST: /[0-9]+/
           </div>
           
           <button
-            onClick={() => handleBuild()}
+            onClick={() => { setKSolutions(3); handleBuild(); }}
             disabled={loading}
             className="w-full py-2 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -217,9 +245,16 @@ CONST: /[0-9]+/
           </pre>
         )}
 
-        {/* Graph and variables display */}
+        {/* Example Solutions and Graph display */}
         {dotString && (
           <>
+            <ExampleSolutions
+              solutions={exampleSolutions}
+              kSolutions={kSolutions}
+              onAddExample={handleAddExample}
+              loading={loading}
+            />
+            
             {variables.length > 0 && (
               <div className="flex flex-col gap-2 my-4">
                 <span className="font-semibold text-gray-700">Variable order (drag to reorder):</span>

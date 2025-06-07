@@ -4,13 +4,13 @@ import { NextResponse } from 'next/server';
 export async function POST(request: Request) {
   try {
     // 1️⃣  Parse the incoming JSON only once
-    const { formula, variable_order = [] } = await request.json();
+    const { formula, variable_order = [], k_solutions = 3 } = await request.json();
 
-    // 2️⃣  Forward it unchanged
+    // 2️⃣  Forward all fields including k_solutions
     const backendRes = await fetch('http://localhost:8000/automaton/dot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ formula, variable_order }),
+      body: JSON.stringify({ formula, variable_order, k_solutions }),
     });
 
     if (!backendRes.ok) {

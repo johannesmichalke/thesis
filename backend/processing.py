@@ -11,6 +11,9 @@ import expander  # type: ignore
 from automaton_builder import build_automaton, is_deterministic, determinize  # type: ignore
 import libmata.nfa.nfa as mata_nfa  # type: ignore
 
+from solutions import find_shortest_paths, describe_paths
+
+
 ###############################################################################
 # Helper utilities                                                             #
 ###############################################################################
@@ -340,7 +343,7 @@ def add_rankdir_auto(dot: str) -> str:
 ###############################################################################
 
 
-def formula_to_dot(formula: str, variable_order : List[str]) -> Tuple[List[str], str]:
+def formula_to_dot(formula: str, variable_order, k_solutions):
     tree = parser.parse_formula(formula)  # may raise UnexpectedInput
     pure_tree = expander.expand_shorthands(tree)
     syntax_tree_visualizier.syntax_tree_to_dot(tree, filename="syntax_tree")
@@ -349,10 +352,11 @@ def formula_to_dot(formula: str, variable_order : List[str]) -> Tuple[List[str],
     if not is_deterministic(aut):
         aut = determinize(aut)
     aut = mata_nfa.minimize(aut)
-
+    example_solutions = find_shortest_paths(aut, k_solutions)
     dot = aut.to_dot_str()
     dot = convert_int_labels_to_bitstrings(dot, len(variables))
     if variable_order:
+        example_solutions = describe_paths(variables, example_solutions, variable_order)
         if set(variable_order) != set(variables):
             raise AssertionError(
                 "variable_order must be a permutation of the internal "
@@ -364,10 +368,12 @@ def formula_to_dot(formula: str, variable_order : List[str]) -> Tuple[List[str],
         }
         dot = reorder_bitstring_labels(dot, mapping, len(variables))
         variables = variable_order[:]
+    else:
+        example_solutions = describe_paths(variables, example_solutions)
     dot = merge_parallel_edges(dot)
     dot = simplify_automaton_labels(dot)
     dot = add_rankdir_auto(dot)
-    return variables, dot
+    return variables, dot, example_solutions
 
 
 ###############################################################################
